@@ -1,0 +1,213 @@
+﻿#pragma kernel CSMain
+#pragma enable_d3d11_debug_symbols
+
+RWTexture2D<float4> Result;
+
+struct Sphere
+{
+	float3 Center;
+	float Radius;
+	float4 Color;
+	int MaterialType;
+};
+
+struct Ray
+{
+	float3 Original;
+	float3 Direction;
+	float3 NormalDirection;
+};
+
+struct HitResult
+{
+	bool Hit;
+	float T;
+	float3 Pos;
+	float3 Normal;
+	int MaterialType;
+	float4 Color;
+};
+
+struct ColorResult
+{
+	float4 Color;
+	Ray RayOut;
+	bool Stop;
+};
+
+RWStructuredBuffer<Sphere> Spheres;
+RWStructuredBuffer<float> RandomValue;
+
+uint HitCount;
+uint Sample;
+int MaxDepth;
+float3 LowLeftCorner;
+float3 Horizontal;
+float3 Vertical;
+float3 Original;
+float Width;
+float Height;
+float MinDistance;
+float MaxDistance;
+int Seed;
+
+float A;
+float C;
+float M;
+
+float Range01(int index)
+{
+	uint next = RandomValue[index];
+	uint result;
+	//stdlib里面rand_r方法
+	next *= 1103515245;
+	next += 12345;
+	result = (uint)(next / 65536) % 2048;
+
+	next *= 1103515245;
+	next += 12345;
+	result <<= 10;
+	result ^= (uint)(next / 65536) % 1024;
+
+	next *= 1103515245;
+	next += 12345;
+	result <<= 10;
+	result ^= (uint)(next / 65536) % 1024;
+	
+	RandomValue[index] = next;
+	return result%65535/65535.0f;
+}
+
+HitResult GetHitResult(float3 center, float radius, int type, float4 color, Ray ray, HitResult result)
+{
+	float3 oc = ray.Original - center;
+	float a = dot(ray.Direction, ray.Direction);
+	float b = 2*dot(oc, ray.Direction);
+	float c = dot(oc, oc) - radius*radius;
+	float discriminant = b*b - 4*a*c;
+	if (discriminant > 0)
+	{
+		float t = (-b - sqrt(discriminant))/(2*a);
+		if (t < result.T && t > MinDistance)
+		{
+			result.T = t;
+			result.Pos = ray.Original + t*ray.Direction;
+			result.Hit = true;
+			result.Normal = normalize(result.Pos - center);
+			result.MaterialType = type;
+			result.Color = color;
+		}
+		else
+		{
+			t = (-b + sqrt(discriminant))/(2*a);
+			if (t < result.T && t > MinDistance)
+			{
+				result.T = t;
+				result.Pos = ray.Original + t*ray.Direction;
+				result.Hit = true;
+				result.Normal = normalize(result.Pos - center);
+				result.MaterialType = type;
+				result.Color = color;
+			}
+		}
+	}
+
+	return result;	
+}
+
+Ray CreateRay(float3 o, float3 d)
+{
+	Ray ray;
+	ray.Original = o;
+	ray.Direction = d;
+	ray.NormalDirection = normalize(d);
+	return ray;
+}
+
+float3 GetRandomPointInUnitSphere(int index)
+{
+	//return float3(0, 0, 0);
+
+	float3 p = 2*float3(Range01(index), Range01(index), Range01(index)) - float3(1, 1, 1);
+    p = normalize(p)*Range01(index);
+    return p;
+}
+
+ColorResult GetHitColor(Ray ray, ColorResult colorResult, int depth, int index)
+{
+	bool hit = false;
+	float4 color;
+	HitResult hitResult;
+	hitResult.T = MaxDistance;
+	hitResult.Hit = false;
+	for (uint i = 0; i < HitCount; i++)
+	{
+		float3 center = Spheres[i].Center;
+		float radius = Spheres[i].Radius;
+		int type = Spheres[i].MaterialType;
+		float4 c = Spheres[i].Color;
+
+		hitResult = GetHitResult(center, radius, type, c, ray, hitResult);		
+	}
+
+	if (hitResult.Hit == false)
+	{
+		float t = 0.5f*(ray.NormalDirection.y + 1);
+        colorResult.Color = colorResult.Color*lerp(float4(1, 1, 1, 1), float4(0.5f, 0.7f, 1, 1), t);
+		colorResult.Stop = true;
+	}
+	else
+	{
+		if (hitResult.MaterialType == 1)
+		{
+			if (depth < MaxDepth)
+			{
+				colorResult.Stop = false;
+				float3 target = hitResult.Pos + hitResult.Normal + GetRandomPointInUnitSphere(index);
+				colorResult.RayOut = CreateRay(hitResult.Pos, target - hitResult.Pos);
+				colorResult.Color = colorResult.Color*hitResult.Color;
+			}
+			else
+			{
+				colorResult.Stop = true;
+				colorResult.Color = float4(0, 0, 0, 1);				
+			}
+		}
+	}
+
+	return colorResult;
+}
+
+float rand(float2 co)
+{
+    return frac(sin(dot(co.xy, float2(12.9898,78.233)))*43758.5453);
+}
+
+[numthreads(1,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+	uint x = id.x;
+	uint y = id.y;
+	uint index = id.x + id.y*Width;
+
+	RandomValue[index] = rand(id.xy)*Seed*1000;
+	//RandomValue[index] = x*Seed + y;
+
+	float4 color = float4(0, 0, 0, 0);
+	for (uint i = 0; i < Sample; i++)
+	{
+		ColorResult result;
+		result.Color = float4(1, 1, 1, 1);
+		result.Stop = false;
+		result.RayOut = CreateRay(Original, LowLeftCorner + Horizontal*(x + Range01(index))/Width + Vertical*(y + Range01(index))/Height - Original);
+		int depth = 0;
+		while (!result.Stop)
+		{
+			result = GetHitColor(result.RayOut, result, depth, index);
+			depth += 1;
+		}
+		color += result.Color;
+	}
+
+	Result[id.xy] = color/Sample;
+}
